@@ -31,6 +31,8 @@ Training uses 64 corpus conversations plus 32 original synthetic style examples.
 
 Outputs go to `runs/conversation-v2/`: adapter weights, checkpoint manifest, split selection, fitting curves, and evaluation results. A completed run is never overwritten. To train again, choose a new directory:
 
+
+
 ```sh
 python scripts/train_conversation.py --output runs/my-run --device cpu
 ```
