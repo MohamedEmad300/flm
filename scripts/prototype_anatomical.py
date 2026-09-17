@@ -1,7 +1,8 @@
 """Compare the seeded random interface against anatomical ones.
 
-    python scripts/prototype_anatomical.py                 # real graph if prepared
-    python scripts/prototype_anatomical.py --surrogate     # no 1 GB edge download
+    python scripts/prototype_anatomical.py                      # real graph if prepared
+    python scripts/prototype_anatomical.py --compare-surrogate  # real vs random wiring
+    python scripts/prototype_anatomical.py --surrogate          # no 1 GB edge download
     python scripts/prototype_anatomical.py --presets sensory_to_output visual_to_output
 
 The question this answers is narrow and mechanical: given the same recurrence,
@@ -20,6 +21,11 @@ expose that directly:
 Neither is an accuracy claim. They bound how much an adapter could possibly
 learn from these features, which is the thing the conversation control was
 already telling us to look at.
+
+The number that turned out to matter is neither on its own but the ratio between
+them: --compare-surrogate scores each interface on the real graph and on
+degree-matched random edges. An interface scoring the same either way cannot
+distinguish the connectome from random wiring, whatever its absolute score.
 """
 import argparse
 import json
@@ -89,10 +95,17 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--surrogate', action='store_true',
                         help='Use synthetic edges instead of the prepared graph.')
+    parser.add_argument('--compare-surrogate', action='store_true',
+                        help='Score every interface on the real graph AND on degree-matched '
+                             'random edges, then report the ratio. An interface whose ratio '
+                             'sits at 1 cannot tell the connectome from random wiring.')
     parser.add_argument('--presets', nargs='*', default=['sensory_to_output', 'sensory_to_output_ungrouped',
                                  'visual_to_output', 'retinotopic_to_output'])
     parser.add_argument('--tokens', type=int, default=TOKENS)
     parser.add_argument('--annotations', type=Path, default=ANNOTATIONS)
+    parser.add_argument('--seed', type=int, default=7301,
+                        help='Seeds the interfaces and the surrogate wiring. Vary it to check '
+                             'that a reported ratio is not an artifact of one draw.')
     args = parser.parse_args()
 
     prepared = (GRAPH / 'manifest.json').exists()
@@ -100,7 +113,7 @@ def main():
         if not args.surrogate:
             print('No prepared graph found; falling back to surrogate edges.\n'
                   'Run scripts/prepare_graph.py for topology-dependent numbers.\n')
-        graph = SurrogateGraph(args.annotations)
+        graph = SurrogateGraph(args.annotations, seed=args.seed)
         topology_real = False
     else:
         graph = Connectome()
@@ -112,12 +125,12 @@ def main():
     rng = np.random.default_rng(404)
     embeddings = rng.standard_normal((args.tokens, EMBEDDING_DIM)).astype(np.float32)
 
-    rows = [('random (current)', Reservoir(graph, EMBEDDING_DIM))]
+    rows = [('random (current)', Reservoir(graph, EMBEDDING_DIM, seed=args.seed))]
     for preset in args.presets:
         if preset not in PRESETS:
             raise SystemExit(f'Unknown preset {preset!r}; choose from {sorted(PRESETS)}.')
         rows.append((preset, AnatomicalReservoir(graph, EMBEDDING_DIM, preset=preset,
-                                                 path=args.annotations)))
+                                                 seed=args.seed, path=args.annotations)))
 
     print('--- interfaces ---')
     for name, reservoir in rows:
@@ -153,8 +166,30 @@ def main():
         print(f'  {name:<28} no_edges max |f| = {zero:.1e}   '
               f'intact vs shuffled mean |diff| = {drift:.4f}')
 
-    print('\n' + json.dumps({'topology_real': topology_real,
-                             'results': results}, indent=2))
+    comparison = None
+    if args.compare_surrogate:
+        if not topology_real:
+            raise SystemExit('--compare-surrogate needs the prepared graph; run prepare_graph.py.')
+        print('\n--- topology sensitivity: real vs degree-matched random edges ---')
+        print('  An interface that scores the same either way is blind to the connectome.')
+        null = SurrogateGraph(args.annotations, seed=args.seed,
+                              degree=graph.manifest['directed_edges'] // len(graph.ids))
+        print(f"\n  {'interface':<28} {'real':>8} {'random':>8} {'ratio':>8}")
+        comparison = {}
+        for name, reservoir in rows:
+            if name == 'random (current)':
+                against = Reservoir(null, EMBEDDING_DIM, seed=args.seed)
+            else:
+                against = AnatomicalReservoir(null, EMBEDDING_DIM, preset=name,
+                                              seed=args.seed, path=args.annotations)
+            baseline = statistics(against, embeddings)['effective_dim']
+            real = results[name]['effective_dim']
+            ratio = round(real / baseline, 2) if baseline > 1e-9 else None
+            comparison[name] = {'real': real, 'surrogate': baseline, 'ratio': ratio}
+            print(f'  {name:<28} {real:>8} {baseline:>8} {ratio:>8}')
+
+    print('\n' + json.dumps({'topology_real': topology_real, 'results': results,
+                             'topology_sensitivity': comparison}, indent=2))
 
 
 if __name__ == '__main__':
